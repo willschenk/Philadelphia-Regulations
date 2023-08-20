@@ -1,0 +1,704 @@
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/../common") 
+
+# Public Libraries 
+import argparse
+import requests
+import pandas as pd
+import re
+from datetime import date 
+from datetime import timedelta 
+import numpy as np
+import dateutil
+
+# In-house Libraries 
+import scrapeLogger as sl
+import File
+import Path 
+
+# Global Variables 
+global logger 
+
+
+def get_nbs_variables(): # return [Integer, Categorical Values] 
+    return [ "UTC", "FHR", "TXN", "TMP", "DPT", "WDR", "WSP", "GST", 
+            "P06", "P12", "PZR", "PSN", "PPL", "PRA", "S06", "I06", 
+            "CIG", "VIS", "SOL", "Min_Temperature", "Max_Temperature", 
+            "T06", "T12", "Q06", "Q12", "SKY"] 
+
+def get_nbe_variables(): # return [Integer, Categorical Values]
+    return ["UTC", "FHR", "TXN", "XND", "TMP", "TSD", "DPT", "DSD", 
+            "SSD", "WDR", "WSP", "WSD", "GST", "GSD", "P12", "DUR", 
+            "PZR", "PSN", "PPL", "PRA", "S12", "I12", "SOL", "SWH", 
+            "Min_Temperature", "Max_Temperature", "Q12", "Q24", "T12", "SKY"] 
+
+def get_nbh_variables(): # return [Integer, Categorical Values] 
+    return ['UTC', 'TMP', 'DPT', 'WDR', 'WSP', 'GST', 'P01', 'P06', 
+            'PZR', 'PSN', 'PPL', 'PRA', 'S01', 'I01', 'CIG', 'VIS', 
+            'SOL', 'Q01', 'T01', 'SKY'] 
+
+def get_nbx_variables(): # return [Integer, Categorical Values] 
+    return ["UTC", "FHR", "TXN", "XND", "TMP", "TSD", "DPT", "DSD", 
+            "SSD", "WDR", "WSP", "WSD", "GST", "GSD", "P12", "DUR", 
+            "PZR", "PSN", "PPL", "PRA", "S12", "I12", "SOL", "Q12", 
+            "Q24", "Min_Temperature", "Max_Temperature", "SKY"] 
+
+
+def get_report_definition(report): 
+    report_definition = { 
+        "NBM_NBS": {
+            "file_url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/blend/prod/blend.{0}/{1}/text/blend_nbstx.t{1}z", 
+            "dest_path": "Weather/Data/Daily_Weather_Forecasts/NBM_NBS/", 
+            "file_name": "date_{0}_blend_nbstx.t{1}z" 
+        }, 
+        "NBM_NBH": {
+            "file_url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/blend/prod/blend.{0}/{1}/text/blend_nbhtx.t{1}z", 
+            "dest_path": "Weather/Data/Daily_Weather_Forecasts/NBM_NBH/", 
+            "file_name": "date_{0}_blend_nbhtx.t{1}z" 
+        }, 
+        "NBM_NBE": { 
+            "file_url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/blend/prod/blend.{0}/{1}/text/blend_nbetx.t{1}z", 
+            "dest_path": "Weather/Data/Daily_Weather_Forecasts/NBM_NBE/", 
+            "file_name": "date_{0}_blend_nbetx.t{1}z" 
+        }, 
+        "NBM_NBX": { 
+        "file_url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/blend/prod/blend.{0}/{1}/text/blend_nbxtx.t{1}z", 
+        "dest_path": "Weather/Data/Daily_Weather_Forecasts/NBM_NBX/", 
+        "file_name": "date_{0}_blend_nbetx.t{1}z" 
+        } 
+    } 
+
+    if report == 'all': 
+        return report_definition 
+    else: 
+        return report_definition[report] 
+
+
+def get_request(url): 
+    # Make a GET request to the provided URL and return the response 
+
+    try:
+        response = requests.get(url)
+    except Exception as e:
+        logger.info(f"Error - Get Request - {url} - {e}") 
+        return False, None 
+    
+    if response.status_code != 200: 
+        logger.info(f"Error - Get Request - {url} - Status Code: {response.status_code}")
+        return False, None 
+    else: 
+        logger.info(f"Success - Get Request - {url}") 
+    
+    return True, response
+
+
+def process_dates(start_offset, end_offset): 
+    ## Process the start and end offsets provided by the user 
+    ## and return a list of dates to be processed 
+
+    # Get the current date and the start and end dates for the scrape 
+    time_now = date.today()
+    time_start = time_now + pd.DateOffset(days=int(start_offset))
+    time_end = time_now + pd.DateOffset(days=int(end_offset)) 
+
+    # Create the date range to be processed 
+    dates = pd.date_range(time_start, time_end, freq="D")
+    if not isinstance(dates, pd.DatetimeIndex): # If not a DatetimeIndex, return False
+        logger.info("Issue: Unable to create date range from provided values")
+        logger.info(f"Start offset: {start_offset}")
+        logger.info(f"End offset:   {end_offset}")
+        return False, False, False
+
+    date_list = dates.tolist() # Convert DatetimeIndex -> list 
+
+    return date_list, True 
+
+
+def get_args(): 
+    ## Parse the command line arguments 
+    report_choices = list(get_report_definition('all')) # Get list of available reports 
+    (_, data_prefix) = Path.returnPath() # Get the path to the data directory 
+
+    parser = argparse.ArgumentParser( # Create the parser 
+        description="A script for scraping National Weather Service forecasts from NOAA at https://www.nws.noaa.gov/mdl/synop/products.php",
+        epilog="See report_definition for reports currently supported by scrape; add reports as desired",
+    )
+    parser.add_argument(
+        "-r",
+        "--report",
+        dest="report_name",
+        required=True, # The report must be provided 
+        default=False,
+        choices=report_choices, 
+        help="Internally-assigned report name to distinguish between forecast products; leave blank for list of available reports",
+    )
+    parser.add_argument(
+        "-so",
+        "--start_offset",
+        dest="start_offset",
+        required=False,
+        default=0,
+        help="Positive or negative integer offset, in days, from current datetime for scrape start",
+    )
+    parser.add_argument(
+        "-eo",
+        "--end_offset",
+        dest="end_offset",
+        required=False,
+        default=0,
+        help="Positive or negative integer offset, in days, from current datetime for scrape end",
+    ) 
+    parser.add_argument(
+        "-hr", 
+        "--hours", 
+        dest="hours",
+        required=False,
+        default=[1, 7, 13, 19], 
+        nargs='+', # Requires at least one hour 
+        help="Hours to record data for",
+    ) 
+    parser.add_argument( 
+        "-s", 
+        "--stations", 
+        dest = "stations", 
+        required = False, 
+        default = "NWS_NBM_Stations.csv", 
+        help = "List of weather stations to retrieve data from. Accepts extensions .csv, .xlsx, or .txt", 
+    ) 
+
+    args = parser.parse_args()
+    
+    arg_success = False # Set arg_success to False by default 
+    if args: # If args is not empty, set arg_success to True 
+        arg_success = True 
+
+    return args, arg_success
+
+
+def setup(): 
+    global logger # Declare the global logger 
+    (log_prefix, _) = Path.returnPath() # Get the path to the log directory 
+    (args, arg_success) = get_args() # Command line and default arguments 
+    schema = "weather" # Schema for the logger 
+    logger = sl.get_detail_logger("NWS_NBM_Forecast_Scraper", schema, log_prefix, args) # Obtain the logger 
+
+    return args, arg_success 
+
+
+def set_up_directories(report_def): 
+    ## Set up the directories where the data will be saved 
+    (_, data_prefix) = Path.returnPath() # Get the path to the data directory 
+    # Build the paths from this initial data_prefix directory: 
+    initial_path = data_prefix + report_def["dest_path"] + "initial/"
+    compare_path = data_prefix + report_def["dest_path"] + "compare/"
+    final_path = data_prefix + report_def["dest_path"] + "final/"
+    dir_list = [initial_path, compare_path, final_path] # Combine the paths into a list (We will pass this into save_compare_copy()) 
+    
+    # Create directories in paths if needed 
+    for dir_path in dir_list:
+        File.createDirectory(dir_path) 
+    # Every directory needs to be created / available. Otherwise, terminate the program 
+    if len(dir_list) != 3: # The directory list is empty. No where to save the data. Terminate the program 
+        return False, "set_up_directories() - Imcomplete Directory List", None 
+    return True, "Set up directories", dir_list 
+
+
+def scrape_and_save(args, date_list, report_def, dir_list): 
+    ## Scrape the data and save it to the appropriate directory 
+    ## We are scraping from here: https://nomads.ncep.noaa.gov/pub/data/nccf/com/blend/prod/blend.YYYYMMDD/HH/text/blend_nbMtx.tCCz # M = Model, CC = Cycle (Hour)
+    
+    for this_date in date_list: # For each date
+        this_date_formatted = this_date.strftime("%Y%m%d") # Properly format 
+        logger.info(f"Processing date: {this_date} :: {this_date_formatted}") 
+
+        for this_hour in args.hours: # For each hour            
+            this_hour_formatted = str(this_hour).zfill(2) # Properly format  
+            file_url = report_def["file_url"].format(this_date_formatted, str(this_hour).zfill(2)) # Format URL 
+            file_success, file_response = get_request(file_url) # Request URL 
+
+            if file_success == True: # Save and Compare 
+                function_success, function_msg = File.save_compare_copy( 
+                    file_response.text, # Text contents of file 
+                    report_def["file_name"].format(this_date_formatted, this_hour_formatted) + "_raw.txt", # Name of the file to be saved 
+                    dir_list # List of directories 
+                ) 
+                if function_success == False: 
+                    logger.info(f"Error - Save_Compare_Copy() - {function_msg}") 
+
+    return True, "scrape_and_save() complete" 
+
+
+def get_header(header_row): 
+    ## Creates a dictionary of header information based on the header row 
+    header = {} 
+    header["station"], c1, c2, c3, c4, date, time, tz = header_row.split() 
+    header["model"] = f"{c1} {c2} {c3} {c4}"  
+    header["short_model"] = c3 
+    header["forecast_start_time"] = dateutil.parser.parse(f"{date} {time} {tz}") 
+    return header 
+
+
+def get_variables(report_name): 
+    # Returns a list of variables for the report 
+    if report_name == "NBM_NBS": 
+        variables = get_nbs_variables() 
+    elif report_name == "NBM_NBH": 
+        variables = get_nbh_variables() 
+    elif report_name == "NBM_NBE": 
+        variables = get_nbe_variables() 
+    elif report_name == "NBM_NBX": 
+        variables = get_nbx_variables() 
+    else: 
+        raise Exception("get_variables() - Invalid report name") 
+    
+    return variables 
+
+
+def create_min_max_temp(df): 
+
+    df.loc[df.index.hour == 0, "Max_Temperature"] = df.loc[df.index.hour == 0, "TXN"] 
+    df.loc[df.index.hour == 12, "Min_Temperature"] = df.loc[df.index.hour == 12, "TXN"] 
+
+    df["Max_Temperature"] = df["Max_Temperature"].fillna(method='bfill') 
+    df["Min_Temperature"] = df["Min_Temperature"].fillna(method='ffill')
+
+    return df 
+
+
+def parse_row(row, row_start, row_end, element_jump): 
+    ## Parses a row of data and return the list of values 
+    row = row.rstrip("\n") # Remove the newline character 
+    row = row.replace("999", "   ") # Fix 999 issue 
+    
+    while len(row) < row_end: # Handles the case where the row is shorter than it should be, i.e. A missing data point 
+        row += ' ' # 
+
+    while len(row) > row_end: # Handles the case where the row is longer than it should be, i.e. Climo Data 
+        row = row[:-1] 
+
+    var = row[:4].strip() # Get the variable name 
+    vals = [] # Vals will hold the values for each hour 
+    
+    # Loop through the row and get the values for each element. 
+    for i in range(row_start, row_end, element_jump): # Have it start at row_start and end at row_end, incrementing by element_jump 
+        val = row[i : i + element_jump].strip() # Get the value for the element 
+        val = re.sub('[^\d]', '', val) # Remove any non-digit characters while keeping spaces 
+        if val == "": # Not a number 
+            vals.append("nan") 
+        else: # Is a number 
+            vals.append(val) 
+
+    return var, vals
+    
+
+def initial_clean_df(weather_df): 
+    ##  Name the (single) column, Remove number row at the top, convert empty rows to nan, and reset the index 
+    # Note: At the start, all of the data is placed into a single element of the dataframe 
+    try: 
+        # Rename the 0 column as "Data"
+        weather_df.rename(columns = {0:"Data"}, inplace = True) 
+
+        # Remove first row if it is a string of integers 
+        # Note: Often, the top of the page starts the number 1 -> Disregard this 
+        if bool(re.search("^[0-9]+$", weather_df.iloc[0, 0])):
+            weather_df.drop(weather_df.index[0], inplace=True)
+
+        # Reset Index: 
+        weather_df.reset_index(drop=True, inplace=True) 
+
+        # In order to identify empty lines, find the longest string in the dataframe. Then remove these empty lines using df.replace 
+        max_length = 0 
+        for data in weather_df["Data"]: 
+            string_length = len(data) 
+            if string_length > max_length: 
+                max_length = string_length 
+            else: 
+                continue 
+        empty_string = "".ljust(max_length) 
+
+        # Replace Empty Strings with NaN 
+        weather_df.replace(to_replace=empty_string, value=np.nan, inplace=True) 
+    except Exception as e: 
+        raise Exception(f"initial_clean_df() - {e}") 
+    return weather_df 
+
+
+def rename_columns(df): 
+    try: 
+        df = df.reset_index() 
+        df.rename(columns={ 
+                'index' : 'datetime', 
+                "SKY": "SKYCOVER", 
+                "forecast_start_time": "forecast_datetime_gmt" 
+                }, inplace = True
+                ) 
+    except Exception as e: 
+        raise Exception(f"rename_columns() - {str(e)}")
+    return df 
+
+
+def reorder_columns(df): 
+    try: 
+        df["tz_offset"] = "nan"
+        first_columns = [
+            "model",
+            "short_model",
+            "station",
+            "forecast_datetime_gmt", 
+            "datetime", 
+            "tz_offset", 
+        ]
+        last_columns = df.columns.difference(first_columns).tolist()
+        df = df[first_columns + last_columns] 
+    except Exception as e: 
+        raise Exception(f"reorder_columns() - {str(e)}") 
+    return df 
+
+
+def reformat_columns(df): 
+    try: 
+        df["tz_offset"] = df["forecast_datetime_gmt"].dt.strftime("%z") 
+        df["forecast_datetime_gmt"] = df["forecast_datetime_gmt"].dt.strftime("%Y-%m-%d %H:%M:%S") 
+        df["datetime"] = df["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S") 
+    except Exception as e: 
+        raise Exception(f"reformat_columns() - {str(e)}") 
+    return df 
+
+
+def remove_columns(df): 
+    try: 
+        columns_to_remove = ["UTC", "FHR", "TXN"] 
+        df = df.drop(columns=columns_to_remove, errors="ignore") 
+    except Exception as e: 
+        raise Exception(f"remove_columns() - {str(e)}") 
+    return df 
+
+
+def manipulate_columns(df): 
+    try: 
+        df = df.replace("999", "nan") 
+        df = rename_columns(df)
+        df = remove_columns(df) 
+        df = reformat_columns(df) 
+        df = reorder_columns(df) 
+    except Exception as e: 
+        raise Exception(f"manipulate_columns() - {str(e)}") 
+    return df 
+
+
+def get_fntime_all(start_time, time_delta, how_many_hours): 
+    # Return a list of finish times (times we are predicting weather for) 
+    finish_times_ex = [] 
+    for i in range(0, how_many_hours): 
+        future_time = start_time + timedelta(hours = time_delta * i) 
+        finish_times_ex.append(future_time) 
+    return finish_times_ex 
+
+
+def count_hours(hour_row): 
+    # Count the number of hours in the row (The number of predictions made) 
+    hour_row = re.sub('[^\d\s]', '', hour_row) # Remove any non-digit characters while keeping spaces 
+    hour_row = [int(num) for num in hour_row.split()] # Split the string into a list of hours and convert each hour to an integer 
+    how_many_hours = len(hour_row) # Count the number of hours in the list 
+    return how_many_hours, hour_row
+
+
+def get_time_delta(report): 
+    # Return number of hours between each weather prediction 
+    if report == "NBM_NBH": 
+        return 1 
+    elif report == "NBM_NBS": 
+        return 3 
+    elif report == "NBM_NBE": 
+        return 12 
+    elif report == "NBM_NBX": 
+        return 12 
+    else: 
+        raise Exception("get_time_delta() - Invalid report name")
+
+
+def get_row_start(df): 
+    # Take a dataframe of length 1 and break it down by rows 
+    df = df.iloc[0:3, 0] # Take the first three rows of the dataframe and the only column 
+
+    # Take each row in the dataframe, splice it, and check if it starts with UTC 
+    for i in range(0, 3): 
+        # For each line, check if it starts with UTC 
+        if df.iloc[i][0:4].strip() == "UTC": 
+            return i 
+    raise Exception("get_row_start - No UTC row found") 
+
+
+def get_row_parsing_info(report_name): 
+    # We will return -> row_start, row_end, element_jump 
+    # Remember: Each row starts with a space 
+    if report_name == "NBM_NBH": 
+        return 5, 80, 3 
+    elif report_name == "NBM_NBS": 
+        return 5, 74, 3 
+    elif report_name == "NBM_NBE": 
+        return 7, 67, 4 
+    elif report_name == "NBM_NBX": 
+        return 5, 70, 4 # It often does not go out to 70 characters. But that is the true maximum length. 
+    else: 
+        raise Exception("get_row_parsing_info() - Invalid report name")
+
+
+def find_first_datetime(start_time, first_hour): 
+    # Find the first datetime in the forecast (first time for which a prediction is made)
+    hour_diff = (first_hour - start_time.hour) % 24 
+    if hour_diff == 0: 
+        hour_diff = 24 
+    next_time = start_time + timedelta(hours = hour_diff) 
+    return next_time 
+
+
+def organize_data(weather_df, header_dict, all_grouped_data, report_name): 
+    # Obtain parameters for parsing and then loop through, and organize the data.  
+    all_df = pd.DataFrame() 
+
+    try: # Common variables between each weather station: 
+        ## Note: While, in theory, these parameters could be different for each station, they are not for NWS - NBM data. 
+        ## Therefore, these components are not included in the loop for time efficiency and to remain easy to change. 
+        
+        # Time delta between each forecast i.e. hourly = 1 
+        time_delta = get_time_delta(report_name) # How often the forecast occurs 
+
+        # Starting row -> Use the first station as the prototype 
+        starting_row = get_row_start(weather_df.iloc[all_grouped_data[0]]) 
+
+        # Hour row -> Use the first station as the prototype 
+        utc_row = weather_df.iloc[all_grouped_data[0]].iloc[starting_row,0] 
+
+        # Forecast Extent and hour list 
+        how_many_hours, utc_hour_list = count_hours(utc_row)       
+
+        # Fields for the report 
+        variables = get_variables(report_name) 
+        
+        all_cols = variables 
+
+        # Column names 
+        key_column_list = [k for k in header_dict[0].keys()] + all_cols 
+
+        # This will tell us how to parse the data (where it starts, where it ends, and how many elements to jump) 
+        row_start, row_end, element_jump = get_row_parsing_info(report_name) 
+        
+        # Start time -> Use the first station as the prototype 
+        forecast_start_time = header_dict[0]['forecast_start_time'] 
+
+        # First forecast datetime 
+        first_datetime = find_first_datetime(forecast_start_time, utc_hour_list[0]) # First forecast time 
+        
+        # Forecast end times 
+        finish_times_ex = get_fntime_all(first_datetime, time_delta, how_many_hours) 
+
+        for i in range(0, len(header_dict) - 1): # For each header (each station) 
+            header_i = header_dict[i] # Header for this station 
+            
+            this_station = weather_df.iloc[all_grouped_data[i][starting_row:]].iloc[:, 0] # Station data starting at UTC (starting_row)
+
+            df = pd.DataFrame(header_i, columns=key_column_list, index=finish_times_ex) # Temporary dataframe with columns and finish_times 
+            
+            for row in this_station: # For each row in the station data 
+                var, vals = parse_row(row, row_start, row_end, element_jump) # Parse the row 
+                df[var] = np.array(vals[0:how_many_hours], dtype="object") 
+                if (var == "TXN"): # TXN variable holds both minimum and maximum temperature values 
+                    df = create_min_max_temp(df) # Identify these temperature values 
+
+            df = df.replace(np.nan, "nan") # Replace nans with "nan" f
+
+            all_df = pd.concat([all_df, df]) 
+
+    except Exception as e: 
+        raise Exception(f"organize_data() - {e}") 
+    return all_df 
+
+
+def final_clean(all_df, final_path): 
+    ## Remove nans, move from raw to done, convert the resulting file to a .csv 
+    try: 
+        all_df = all_df.replace("nan", "") 
+        all_df.reset_index(drop=True, inplace=True) 
+        result_file = final_path.replace("raw", "done") 
+        result_file = result_file.replace(".txt", ".csv") 
+        all_df.to_csv(result_file, index=False) 
+        os.remove(final_path) # Delete final_path's file 
+    except Exception as e: 
+        raise Exception(f"final_clean() - {e}") 
+
+
+def choose_stations(headers_dict, data_indexes, stations_file): 
+    _, file_extension = os.path.splittext(stations_file) 
+    if file_extension == '.csv' or file_extension == '.txt': 
+        stations_df = pd.read_csv(stations_file, header = None) 
+    if file_extension == '.xlsx': 
+        stations_df = pd.read_excel(stations_file, header = None) 
+    else: 
+        raise Exception(f"Unsupported file type: {file_extension}") 
+
+    # Convert this DataFrame to a list: 
+    station_ids_to_retrieve = stations_df[0].tolist() 
+
+    # Get the stations from headers_dict 
+    header_stations = [v['station'] for v in headers_dict.values()] 
+
+    # Get the indexes of matching stations 
+    matching_indexes = np.where(np.isin(header_stations, station_ids_to_retrieve))[0].tolist() 
+
+    # Select only indexes that match 
+    updated_data_indexes = [data_indexes[i] for i in matching_indexes] 
+
+    # Select only headers that match 
+    updated_headers_dict = {k: v for k, v in headers_dict.items() if k in matching_indexes} 
+
+    return updated_headers_dict, updated_data_indexes 
+
+
+def import_stations_file(stations_file): 
+    script_dir = os.path.dirname(__file__) # Get the directory of the current script 
+    file = os.path.join(script_dir, stations_file) # Join the directory with the filename. 
+    _, file_extension = os.path.splitext(file) 
+    if file_extension == '.csv' or file_extension == '.txt': 
+        stations_df = pd.read_csv(file, header = None) 
+    elif file_extension == '.xlsx': 
+        stations_df = pd.read_excel(file, header = None) 
+    else: 
+        raise Exception(f"Unsupported file type - {file_extension}") 
+    # Convert this DataFrame to a list and return it
+    return stations_df[0].tolist() 
+
+
+def identify_headers_indexes(weather_df): 
+    headers_dict = {} 
+    data_indexes = [] 
+    grouped_data = [] 
+    i = 0 
+    for index, row in weather_df.iterrows(): 
+        if pd.isna(row[0]) and index < len(weather_df) - 1: # If not a number and not the last row 
+            headers_dict[i] = get_header(weather_df.iloc[index + 1, 0])  # Get header on the next line 
+            if grouped_data: # Only if grouped_data already has information in it -> 
+                data_indexes.append(grouped_data) # Append this list of indexes to data_indexes (the list of lists) 
+            grouped_data = [] # Reset grouped_data 
+            i += 1 
+        else: 
+            grouped_data.append(index) # The row exists 
+    return headers_dict, data_indexes 
+
+
+def get_relevant_data(weather_df, stations_file): 
+    ## Obtain only the headers and data indexes of stations located in stations_file 
+    try: 
+        # Get where the components of the data are located 
+        station_ids = import_stations_file(stations_file) 
+        headers_dict, data_indexes = identify_headers_indexes(weather_df)
+
+        # Get the stations from headers_dict 
+        header_stations = [v['station'] for v in headers_dict.values()] 
+
+        # Get the indexes of matching stations -> Where we only some some of the stations 
+        matching_indexes = np.where(np.isin(header_stations, station_ids))[0].tolist() 
+
+        # Select the data_indexes that match 
+        updated_data_indexes = [data_indexes[i] for i in matching_indexes] 
+
+        # Select the headers that match 
+        headers_dict = {k: v for k, v in headers_dict.items() if k in matching_indexes} 
+
+        # Update the headers_dict to reflect the new indexes 
+        updated_headers_dict = {i : headers_dict[k] for i, k in enumerate(matching_indexes) if k in headers_dict}
+
+    except Exception as e: 
+        raise Exception(f"get_relevant_data() - {e}") 
+    
+    return updated_headers_dict, updated_data_indexes 
+
+
+def parse(args, dir_list): 
+    ## Loop through all files in the directory  
+    for file in os.listdir(dir_list[2]): 
+        if "done" in file: 
+            logger.info(f"File {file} - already parsed") 
+            continue 
+        else: 
+            file_path = dir_list[2] + file 
+
+            try: # Ensure each of these throw specific errors and catch them  
+                # Import into a df 
+                weather_df = pd.read_csv(file_path, header = None, skip_blank_lines = False) 
+                
+                # Initial clean, i.e. reset index, remove an unneccessary row, ect. 
+                weather_df = initial_clean_df(weather_df) 
+                
+                # Obtain a dictionary of the headers (each station) and indexes for respective data 
+                headers_chosen_dict, data_chosen_indexes = get_relevant_data(weather_df, args.stations) 
+                
+                # Organize all of this into a proper dataFrame (Not one with just one column)
+                all_df = organize_data(weather_df, headers_chosen_dict, data_chosen_indexes, args.report_name) 
+                
+                # Make changes to the columns in the dataFrame 
+                all_df = manipulate_columns(all_df) 
+
+                # Provide a final clean and relocate files 
+                final_clean(all_df, file_path) 
+
+            except FileNotFoundError: 
+                logger.info(f"Error - Parse - {file} - File {file} - not found here - {file_path}") 
+            except Exception as e: 
+                logger.info(f"Error - Parse - {file} - {str(e)}") 
+
+    return True, f"Parse {args.report_name} - Complete" 
+
+
+def process(args): 
+    ## Process the arguments provided. 
+    ## If any component is unsuccessful, the program terminates
+    ## since each component here is required. Hence, the check_success() function. 
+
+    # Get report parameters 
+    report_def = get_report_definition(args.report_name) 
+    check_success(True, f"Report parameters obtained: {report_def}") 
+
+    # Set up / Create Directories 
+    success, msg, dir_list = set_up_directories(report_def) 
+    check_success(success, msg) 
+
+    # Process Dates
+    date_list, success = process_dates(args.start_offset, args.end_offset)
+    check_success(success, f"Processing Dates - {date_list}") 
+    
+    # Scrape and Save  
+    success, msg = scrape_and_save(args, date_list, report_def, dir_list) 
+    check_success(success, msg) 
+
+    # Parse 
+    success, msg = parse(args, dir_list) 
+    check_success(success, msg)  
+
+
+def check_success(success, msg): 
+    ## Log results. If there is an error, end the program. 
+    if success == False: 
+        logger.info(f"Error - {msg}")
+        sl.done(logger, "ERROR") 
+        sys.exit()
+    else: 
+        logger.info(f"Success - {msg}") 
+
+
+def main(): 
+    args, arg_success = setup() 
+
+    if not arg_success: 
+        logger.info("Argument parsing failed") 
+        sl.done(logger, "Error") 
+        sys.exit() 
+
+    process(args) 
+    
+    sl.done(logger, "SUCCESS") 
+
+
+main() 

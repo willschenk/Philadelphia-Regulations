@@ -1,0 +1,4 @@
+2023-07-29 15:34:55 - INFO - Ensured the existence of directory: ../ScrapeBox/publications
+2023-07-29 15:34:56 - INFO - Successfully fetched data from the API.
+2023-07-29 15:34:56 - INFO - Processed 1451 records from the fetched data.
+2023-07-29 15:34:56 - INFO - Created new CSV file at ../ScrapeBox/publications/publications_data.csv
